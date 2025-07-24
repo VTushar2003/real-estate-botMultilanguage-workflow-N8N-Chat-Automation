@@ -1,0 +1,313 @@
+{
+  "meta": {
+    "version": "1.2",
+    "id": "re-listing-suite",
+    "name": "AI-Powered Real-Estate Listing & Management",
+    "createdAt": "2025-07-20T17:15:00Z",
+    "updatedAt": "2025-07-20T17:15:00Z",
+    "tags": ["real-estate", "whatsapp", "google-maps", "mongodb", "ai"]
+  },
+  "settings": {
+    "timezone": "Asia/Kolkata",
+    "executionTimeout": 7200
+  },
+  "nodes": [
+
+    {
+      "id": "whatsAppWebhook",
+      "name": "WhatsApp Trigger",
+      "type": "n8n-nodes-base.whatsAppBusinessCloud.trigger",
+      "credentials": {
+        "whatsAppBusinessCloudApi": "WHATSAPP_CLOUD"
+      },
+      "parameters": {
+        "events": ["messages", "messages.read"],
+        "verifyToken": "WEBHOOK_VERIFY_TOKEN"
+      },
+      "position": [0, 0]
+    },
+
+    {
+      "id": "sessionInit",
+      "name": "Init Session & Check Plan",
+      "type": "n8n-nodes-base.code",
+      "parameters": {
+        "language": "javascript",
+        "code": "// free=2 listings, paid=unlimited\nconst msisdn = $json.contacts[0].wa_id;\nconst plan = await getPlan(msisdn); // helper fn (Mongo lookup)\nitems[0].json.plan = plan;\nreturn items;"
+      },
+      "position": [220, -140]
+    },
+
+    {
+      "id": "planGuard",
+      "name": "Plan Quota Guard",
+      "type": "n8n-nodes-base.if",
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json.plan.listingsRemaining}}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "position": [460, -140]
+    },
+
+    {
+      "id": "quotaExceeded",
+      "name": "Send Quota Exceeded",
+      "type": "n8n-nodes-base.whatsAppBusinessCloud",
+      "parameters": {
+        "operation": "sendTemplate",
+        "templateName": "quota_exhausted",
+        "language": "en_US",
+        "to": "={{$json.contacts[0].wa_id}}"
+      },
+      "position": [720, -260],
+      "disabled": false
+    },
+
+    {
+      "id": "aiClassifier",
+      "name": "AI: Classify Property & Txn",
+      "type": "n8n-nodes-base.openai",
+      "credentials": {
+        "openAIApi": "OPENAI_KEY"
+      },
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "systemMessage": "You are a real-estate intake assistant. Extract property_type, transaction_type, budget, and missing_fields list from the user text.",
+        "input": "={{$json.messages[0].text.body}}",
+        "jsonOutputs": [
+          "property_type",
+          "transaction_type",
+          "budget",
+          "missing_fields"
+        ]
+      },
+      "position": [460, 20]
+    },
+
+    {
+      "id": "missingFieldLoop",
+      "name": "Loop Missing Fields",
+      "type": "n8n-nodes-base.splitOut",
+      "parameters": {
+        "fieldToSplitOut": "missing_fields"
+      },
+      "position": [700, 20]
+    },
+    {
+      "id": "askQuestion",
+      "name": "Ask Follow-up",
+      "type": "n8n-nodes-base.whatsAppBusinessCloud",
+      "parameters": {
+        "operation": "sendMessage",
+        "messageText": "={{`Please provide ${$json} to complete the listing.`}}",
+        "to": "={{$node[\"whatsAppWebhook\"].json[\"contacts\"][0][\"wa_id\"]}}"
+      },
+      "position": [920, 20]
+    },
+
+    {
+      "id": "extractCoords",
+      "name": "Get Lat/Lon",
+      "type": "n8n-nodes-base.set",
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            { "name": "lat", "value": "={{$json.messages[0].location.latitude}}"},
+            { "name": "lon", "value": "={{$json.messages[0].location.longitude}}"}
+          ]
+        }
+      },
+      "position": [220, 180]
+    },
+    {
+      "id": "googlePlaces",
+      "name": "Google: Nearby Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "parameters": {
+        "url": "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+        "method": "GET",
+        "queryParameters": [
+          { "name": "location", "value": "={{$json.lat+','+$json.lon}}"},
+          { "name": "radius",   "value": "300"},
+          { "name": "key",      "value": "={{$env.GOOGLE_PLACES_KEY}}"}
+        ]
+      },
+      "position": [460, 180]
+    },
+
+    {
+      "id": "downloadMedia",
+      "name": "Download Images",
+      "type": "n8n-nodes-base.whatsAppBusinessCloud",
+      "parameters": {
+        "operation": "downloadMedia",
+        "mediaId": "={{$json.messages[0].image.id}}"
+      },
+      "position": [220, 340]
+    },
+    {
+      "id": "storeS3",
+      "name": "Upload to S3",
+      "type": "n8n-nodes-base.awsS3",
+      "credentials": { "aws": "AWS_S3" },
+      "parameters": {
+        "operation": "upload",
+        "bucket": "re-listings",
+        "fileName": "={{'img_'+Date.now()+'.jpg'}}",
+        "binaryPropertyName": "data"
+      },
+      "position": [460, 340]
+    },
+
+    {
+      "id": "mongoInsert",
+      "name": "MongoDB ➜ Insert Listing",
+      "type": "n8n-nodes-base.mongodb",
+      "credentials": { "mongodb": "MONGO_CONN" },
+      "parameters": {
+        "collection": "properties",
+        "operation": "insert",
+        "fields": {
+          "property_type": "={{$json.property_type}}",
+          "transaction_type": "={{$json.transaction_type}}",
+          "price": "={{$json.budget}}",
+          "coordinates": "={{[$json.lat,$json.lon]}}",
+          "nearby": "={{$node.googlePlaces.json.results}}",
+          "media_urls": "={{$node.storeS3.json.location}}",
+          "agent": "={{$json.contacts[0].wa_id}}",
+          "createdAt": "={{new Date()}}"
+        }
+      },
+      "position": [700, 320]
+    },
+
+    {
+      "id": "aiTitleDesc",
+      "name": "AI: Generate Title + Description",
+      "type": "n8n-nodes-base.openai",
+      "credentials": { "openAIApi": "OPENAI_KEY" },
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "systemMessage": "Write an engaging property title (<60 chars) and a 100-word description from JSON data.",
+        "input": "={{JSON.stringify($node.mongoInsert.json)}}",
+        "jsonOutputs": ["title","description"]
+      },
+      "position": [940, 320]
+    },
+
+    {
+      "id": "generateSignedUrl",
+      "name": "Generate Signed URL (7d)",
+      "type": "n8n-nodes-base.code",
+      "parameters": {
+        "language": "javascript",
+        "code": "// presigned URL via AWS SDK v3\nconst { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');\nconst { getSignedUrl } = require('@aws-sdk/s3-request-presigner');\nconst s3 = new S3Client({});\nconst cmd = new GetObjectCommand({ Bucket:'re-listings', Key:$node.storeS3.json.key });\nitems[0].json.shareUrl = await getSignedUrl(s3, cmd, {expiresIn: 604800});\nreturn items;"
+      },
+      "position": [1180, 320]
+    },
+
+    {
+      "id": "sendConfirmation",
+      "name": "Send Confirmation",
+      "type": "n8n-nodes-base.whatsAppBusinessCloud",
+      "parameters": {
+        "operation": "sendMessage",
+        "messageText": "={{`Listing created! 🎉\\n${$node.aiTitleDesc.json.title}\\n${$node.aiTitleDesc.json.description}\\nView: ${$json.shareUrl}`}}",
+        "to": "={{$json.contacts[0].wa_id}}"
+      },
+      "position": [1420, 320]
+    },
+
+    {
+      "id": "searchTrigger",
+      "name": "WhatsApp Command: /search",
+      "type": "n8n-nodes-base.if",
+      "parameters": {
+        "conditions": {
+          "string": [
+            { "value1":"={{$json.messages[0].text.body}}", "operation":"startsWith", "value2":"/search"}
+          ]
+        }
+      },
+      "position": [0, 540]
+    },
+    {
+      "id": "parseQuery",
+      "name": "Parse Search Params",
+      "type": "n8n-nodes-base.code",
+      "parameters": {
+        "language":"javascript",
+        "code":"const [,city,ptype,budget] = $json.messages[0].text.body.split(' ');\nitems[0].json = {city,ptype,budget:Number(budget)}; return items;"
+      },
+      "position": [220, 540]
+    },
+    {
+      "id": "mongoSearch",
+      "name": "MongoDB ➜ Find Listings",
+      "type": "n8n-nodes-base.mongodb",
+      "parameters": {
+        "collection": "properties",
+        "operation": "find",
+        "query": "{\"property_type\":\"{{$json.ptype}}\",\"price\":{\"$lte\":{{$json.budget}}},\"coordinates\":{\"$geoWithin\":{\"$centerSphere\":[{{$json.city_lat}},{{$json.city_lon}},0.1]}}}"
+      },
+      "position": [460, 540]
+    },
+    {
+      "id": "sendResults",
+      "name": "Send Search Results",
+      "type": "n8n-nodes-base.whatsAppBusinessCloud",
+      "parameters": {
+        "operation": "sendMessage",
+        "messageText": "={{$node.mongoSearch.json.slice(0,5).map(p=>`• ${p.title} – ₹${p.price}\\n${p.shareUrl}`).join('\\n\\n')}}",
+        "to": "={{$json.contacts[0].wa_id}}"
+      },
+      "position": [700, 540]
+    }
+
+  ],
+
+  "connections": {
+    "whatsAppWebhook": { "main": [["sessionInit"]] },
+    "sessionInit":     { "main": [["planGuard"]]     },
+    "planGuard": {
+      "main": [
+        ["aiClassifier","true"],
+        ["quotaExceeded","false"]
+      ]
+    },
+    "aiClassifier": { "main":[["missingFieldLoop"],["extractCoords"]] },
+    "missingFieldLoop": { "main":[["askQuestion"]] },
+    "extractCoords": { "main":[["googlePlaces"],["downloadMedia"]] },
+    "googlePlaces": { "main":[["mongoInsert"]] },
+    "downloadMedia": { "main":[["storeS3"]] },
+    "storeS3": { "main":[["mongoInsert"]] },
+    "mongoInsert": { "main":[["aiTitleDesc"]] },
+    "aiTitleDesc": { "main":[["generateSignedUrl"]] },
+    "generateSignedUrl": { "main":[["sendConfirmation"]] },
+
+    "searchTrigger": { "main":[["parseQuery","true"]] },
+    "parseQuery": { "main":[["mongoSearch"]] },
+    "mongoSearch": { "main":[["sendResults"]] }
+  },
+
+  "credentials": {
+    "WHATSAPP_CLOUD": { "accessToken":"<YOUR_PERMANENT_TOKEN>", "phoneNumberId":"<ID>" },
+    "OPENAI_KEY":     { "apiKey":"<OPENAI_API_KEY>" },
+    "MONGO_CONN":     { "connectionString":"mongodb+srv://user:pass@cluster.mongodb.net/re?retryWrites=true&w=majority" },
+    "AWS_S3":         { "accessKeyId":"<AWS_ACCESS>", "secretAccessKey":"<AWS_SECRET>", "region":"ap-south-1" }
+  },
+
+  "env": {
+    "GOOGLE_PLACES_KEY": "<GOOGLE_API_KEY>"
+  }
+}

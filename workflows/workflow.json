@@ -1,67 +1,37 @@
 {
-  "name": "AI WhatsApp Real Estate Bot - Complete System",
   "nodes": [
     {
       "parameters": {
-        "path": "whatsapp-webhook",
-        "responseMode": "responseNode"
+        "httpMethod": "POST",
+        "path": "webhook",
+        "responseMode": "onReceived",
+        "responseData": {
+          "statusCode": 200,
+          "responseBody": "Message received"
+        }
       },
-      "id": "webhook-main",
-      "name": "WhatsApp Webhook",
+      "id": "WhatsApp Trigger",
+      "name": "WhatsApp Trigger",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 1,
       "position": [100, 300]
     },
     {
       "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "phone",
-              "value": "={{ $json.body?.from || $json.from || '' }}"
-            },
-            {
-              "name": "message",
-              "value": "={{ $json.body?.text?.body || $json.text || '' }}"
-            },
-            {
-              "name": "messageType",
-              "value": "={{ $json.body?.type || 'text' }}"
-            },
-            {
-              "name": "timestamp",
-              "value": "={{ new Date().toISOString() }}"
-            },
-            {
-              "name": "contactName",
-              "value": "={{ $json.body?.contacts?.[0]?.profile?.name || 'Unknown' }}"
-            }
-          ]
-        }
+        "functionCode": "return [{ json: { phone: $json.messages[0].from } }];"
       },
-      "id": "parse-data",
-      "name": "Parse WhatsApp Data",
-      "type": "n8n-nodes-base.set",
+      "id": "Extract Phone",
+      "name": "Extract Phone",
+      "type": "n8n-nodes-base.function",
       "typeVersion": 1,
       "position": [300, 300]
     },
     {
       "parameters": {
-        "operation": "select",
-        "schema": "public",
-        "table": "users",
-        "where": {
-          "conditions": [
-            {
-              "column": "phone",
-              "condition": "equal",
-              "value": "={{ $json.phone }}"
-            }
-          ]
-        }
+        "query": "SELECT * FROM users WHERE phone = '{{ $json.phone }}';"
       },
-      "id": "check-user",
-      "name": "Check User Authentication",
+      "id": "Check User Exists",
+      "name": "Check User Exists",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 1,
       "position": [500, 300]
@@ -69,16 +39,16 @@
     {
       "parameters": {
         "conditions": {
-          "string": [
+          "boolean": [
             {
-              "value1": "={{ $json.length }}",
+              "value1": "={{ $json.length > 0 }}",
               "operation": "equal",
-              "value2": "0"
+              "value2": true
             }
           ]
         }
       },
-      "id": "user-exists",
+      "id": "User Exists Check",
       "name": "User Exists Check",
       "type": "n8n-nodes-base.if",
       "typeVersion": 1,
@@ -86,878 +56,68 @@
     },
     {
       "parameters": {
-        "operation": "insert",
-        "schema": "public",
-        "table": "users",
-        "columns": "phone,name,registration_date,verification_status,user_type,subscription_plan",
-        "values": "={{ $('Parse WhatsApp Data').item.json.phone }},{{ $('Parse WhatsApp Data').item.json.contactName }},{{ new Date().toISOString() }},pending,user,basic"
+        "functionCode": "const Redis = require('ioredis');\nconst redis = new Redis();\n\nconst phone = $json.phone;\nconst key = `user:${phone}:listing_step`;\n\nreturn redis.get(key).then(step => {\n  if (!step) {\n    redis.set(key, 'property_type');\n    return { json: { next_question: 'What type of property would you like to list?' } };\n  }\n\n  if (step === 'property_type') {\n    redis.set(key, 'location');\n    redis.set(`user:${phone}:property_type`, $json.messages[0].text.body);\n    return { json: { next_question: 'What is the location of the property?' } };\n  }\n\n  if (step === 'location') {\n    redis.set(key, 'price');\n    redis.set(`user:${phone}:location`, $json.messages[0].text.body);\n    return { json: { next_question: 'What is the expected price?' } };\n  }\n\n  if (step === 'price') {\n    redis.set(`user:${phone}:price`, $json.messages[0].text.body);\n    const data = {\n      phone,\n      property_type: await redis.get(`user:${phone}:property_type`),\n      location: await redis.get(`user:${phone}:location`),\n      price: $json.messages[0].text.body\n    };\n    await redis.del(key);\n    await redis.del(`user:${phone}:property_type`);\n    await redis.del(`user:${phone}:location`);\n    await redis.del(`user:${phone}:price`);\n    return { json: { insert: true, data } };\n  }\n});"
       },
-      "id": "register-user",
-      "name": "Register New User",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 1,
-      "position": [900, 200]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "otp",
-              "value": "={{ Math.floor(100000 + Math.random() * 900000) }}"
-            },
-            {
-              "name": "phone",
-              "value": "={{ $('Parse WhatsApp Data').item.json.phone }}"
-            }
-          ]
-        }
-      },
-      "id": "generate-otp",
-      "name": "Generate OTP",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [1100, 200]
-    },
-    {
-      "parameters": {
-        "operation": "insert",
-        "schema": "public",
-        "table": "otp_verifications",
-        "columns": "phone,otp,created_at,expires_at,verified",
-        "values": "={{ $json.phone }},{{ $json.otp }},{{ new Date().toISOString() }},{{ new Date(Date.now() + 10*60*1000).toISOString() }},false"
-      },
-      "id": "store-otp",
-      "name": "Store OTP",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 1,
-      "position": [1300, 200]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "response",
-              "value": "🏡 *Welcome to AI Real Estate Bot!*\n\n🔐 **Multi-Factor Authentication Required**\n\nYour verification code: *{{ $json.otp }}*\n\nReply with this 6-digit code to continue.\n\n⏰ _Code expires in 10 minutes_\n\n🔒 Your data is secured with enterprise-grade encryption."
-            }
-          ]
-        }
-      },
-      "id": "format-otp",
-      "name": "Format OTP Response",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [1500, 200]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "userMessage",
-              "value": "={{ $('Parse WhatsApp Data').item.json.message.toLowerCase().trim() }}"
-            },
-            {
-              "name": "phone",
-              "value": "={{ $('Parse WhatsApp Data').item.json.phone }}"
-            }
-          ]
-        }
-      },
-      "id": "analyze-intent",
-      "name": "Analyze Message Intent",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [900, 400]
-    },
-    {
-      "parameters": {
-        "dataType": "string",
-        "value1": "={{ $json.userMessage }}",
-        "rules": {
-          "rules": [
-            {
-              "operation": "regex",
-              "value2": "^[0-9]{6}$"
-            },
-            {
-              "operation": "contains",
-              "value2": "list"
-            },
-            {
-              "operation": "regex",
-              "value2": "(search|find|looking|want).*property"
-            },
-            {
-              "operation": "contains",
-              "value2": "profile"
-            },
-            {
-              "operation": "contains",
-              "value2": "subscribe"
-            },
-            {
-              "operation": "contains",
-              "value2": "verify"
-            },
-            {
-              "operation": "contains",
-              "value2": "help"
-            }
-          ]
-        }
-      },
-      "id": "intent-switch",
-      "name": "AI Intent Classification",
-      "type": "n8n-nodes-base.switch",
-      "typeVersion": 1,
-      "position": [1100, 400]
-    },
-    {
-      "parameters": {
-        "operation": "select",
-        "schema": "public",
-        "table": "otp_verifications",
-        "where": {
-          "conditions": [
-            {
-              "column": "phone",
-              "condition": "equal",
-              "value": "={{ $json.phone }}"
-            },
-            {
-              "column": "otp",
-              "condition": "equal",
-              "value": "={{ $json.userMessage }}"
-            },
-            {
-              "column": "verified",
-              "condition": "equal",
-              "value": "false"
-            },
-            {
-              "column": "expires_at",
-              "condition": "greaterThan",
-              "value": "={{ new Date().toISOString() }}"
-            }
-          ]
-        }
-      },
-      "id": "verify-otp",
-      "name": "Verify OTP",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 1,
-      "position": [1300, 350]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "response",
-              "value": "🏠 **Property Listing Wizard**\n\n✨ Let's create your premium property listing!\n\n**Step 1: Property Type**\n\n🏘️ **1.** Residential (House/Apartment/Flat)\n🏢 **2.** Commercial (Office/Shop/Warehouse)\n🏭 **3.** Plot/Land (Agricultural/Residential)\n🏡 **4.** Villa/Bungalow\n🏨 **5.** Rental Property\n\n**Advanced AI Validation:** Our system will automatically verify your property details for accuracy and market compliance.\n\nReply with the number (1-5)"
-            },
-            {
-              "name": "step",
-              "value": "property_type_selection"
-            }
-          ]
-        }
-      },
-      "id": "property-listing",
-      "name": "Smart Property Listing",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [1300, 450]
-    },
-    {
-      "parameters": {
-        "model": "gpt-4",
-        "options": {
-          "temperature": 0.3,
-          "maxTokens": 500
-        },
-        "messages": [
-          {
-            "role": "system",
-            "content": "You are an advanced real estate AI assistant specializing in Indian property markets. Extract detailed search parameters from user queries including location, price range, property type, bedrooms, bathrooms, area, amenities, and preferences. Return structured JSON: {\"location\": \"\", \"priceMin\": 0, \"priceMax\": 0, \"propertyType\": \"\", \"bedrooms\": 0, \"bathrooms\": 0, \"areaMin\": 0, \"areaMax\": 0, \"amenities\": [], \"preferences\": []}"
-          },
-          {
-            "role": "user",
-            "content": "{{ $json.userMessage }}"
-          }
-        ]
-      },
-      "id": "ai-search-parser",
-      "name": "AI Property Search Engine",
-      "type": "n8n-nodes-base.openAi",
-      "typeVersion": 1,
-      "position": [1300, 550]
-    },
-    {
-      "parameters": {
-        "operation": "select",
-        "schema": "public",
-        "table": "properties",
-        "where": {
-          "conditions": [
-            {
-              "column": "status",
-              "condition": "equal",
-              "value": "active"
-            },
-            {
-              "column": "verified",
-              "condition": "equal",
-              "value": "true"
-            }
-          ]
-        },
-        "limit": 10,
-        "sort": {
-          "rules": [
-            {
-              "column": "created_at",
-              "direction": "DESC"
-            }
-          ]
-        }
-      },
-      "id": "search-properties",
-      "name": "Intelligent Property Search",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 1,
-      "position": [1500, 550]
-    },
-    {
-      "parameters": {
-        "functionCode": "// Advanced secure link generation with JWT and analytics tracking\nconst jwt = require('jsonwebtoken');\nconst crypto = require('crypto');\n\nconst properties = $input.all();\nconst results = [];\nconst userPhone = $('Parse WhatsApp Data').item.json.phone;\n\nfor (const property of properties) {\n  // Generate secure JWT token with expiration\n  const token = jwt.sign(\n    {\n      propertyId: property.json.id,\n      recipientPhone: userPhone,\n      accessLevel: 'view',\n      exp: Math.floor(Date.now() / 1000) + (10 * 60), // 10 minutes\n      iat: Math.floor(Date.now() / 1000)\n    },\n    process.env.JWT_SECRET || 'your-ultra-secure-secret-key-change-this'\n  );\n  \n  // Generate unique tracking ID\n  const trackingId = crypto.randomUUID();\n  \n  const secureLink = `https://your-domain.com/secure-property/${token}?track=${trackingId}`;\n  \n  results.push({\n    ...property.json,\n    secureLink,\n    trackingId,\n    expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),\n    accessCount: 0,\n    generatedFor: userPhone\n  });\n}\n\nreturn results;"
-      },
-      "id": "secure-links",
-      "name": "Generate Secure Property Links",
+      "id": "Conversation Logic",
+      "name": "Conversation Logic",
       "type": "n8n-nodes-base.function",
       "typeVersion": 1,
-      "position": [1700, 550]
+      "position": [900, 300]
     },
     {
       "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "response",
-              "value": "🔍 **Intelligent Property Search Results**\n\n✨ Found **{{ $input.all().length }}** verified properties matching your criteria:\n\n{% for property in $input.all() %}\n🏠 **{{ property.title || 'Premium Property' }}**\n📍 **Location:** {{ property.location || 'Premium Location' }}\n💰 **Price:** ₹{{ property.price || 'Contact for Price' }}\n📐 **Area:** {{ property.area || 'N/A' }} sq ft\n🛏️ **Bedrooms:** {{ property.bedrooms || 'N/A' }}\n🚿 **Bathrooms:** {{ property.bathrooms || 'N/A' }}\n\n🔗 **[🔒 Secure View Details]({{ property.secureLink }})**\n⏱️ _Link expires in 10 minutes | Analytics tracked_\n\n💡 **Agent:** {{ property.agent_name || 'Verified Agent' }}\n📱 **Contact:** {{ property.agent_phone || 'Available on request' }}\n\n---\n{% endfor %}\n\n🎯 **Want more specific results?** \nTry: \"3BHK villa in Udaipur under 50 lakhs\"\n\n💎 **Upgrade to Premium** for unlimited searches and AI-powered recommendations!"
-            }
-          ]
-        }
-      },
-      "id": "format-results",
-      "name": "Format Search Results",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [1900, 550]
-    },
-    {
-      "parameters": {
-        "operation": "select",
-        "schema": "public",
-        "table": "users",
-        "where": {
-          "conditions": [
-            {
-              "column": "phone",
-              "condition": "equal",
-              "value": "={{ $json.phone }}"
-            }
-          ]
-        }
-      },
-      "id": "get-profile",
-      "name": "Get User Profile",
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 1,
-      "position": [1300, 650]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "response",
-              "value": "👤 **Your Smart Profile Dashboard**\n\n📱 **Phone:** {{ $json.phone }}\n👤 **Name:** {{ $json.name }}\n✅ **Status:** {{ $json.verification_status === 'verified' ? '🔒 Verified Premium User' : '⏳ Pending Verification' }}\n🏷️ **Account Type:** {{ $json.user_type }}\n💎 **Plan:** {{ $json.subscription_plan || 'Basic' }}\n📅 **Member Since:** {{ $json.registration_date }}\n\n**🚀 Available Commands:**\n• `list` - List a property with AI validation\n• `search [query]` - Smart property search\n• `profile` - View/edit your profile\n• `subscribe` - Upgrade to premium plans\n• `analytics` - View your activity insights\n• `verify agent` - Become a verified agent\n• `help` - Get AI assistance\n\n**🔥 Quick Actions:**\n• Voice commands supported 🎙️\n• Multi-language support 🌐\n• Real-time market insights 📊"
-            }
-          ]
-        }
-      },
-      "id": "format-profile",
-      "name": "Format Profile Dashboard",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [1500, 650]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "response",
-              "value": "💎 **Premium Subscription Plans**\n\n🆓 **Basic Plan (Current)**\n• 5 property listings/month\n• Basic search functionality\n• Standard support\n• Limited analytics\n\n⭐ **Premium Plan - ₹999/month**\n• ♾️ Unlimited property listings\n• 🤖 AI-powered property matching\n• 🔒 Advanced security features\n• 📊 Detailed analytics dashboard\n• 🚀 Priority customer support\n• 📱 Voice command support\n• 🎯 Smart lead generation\n\n🚀 **Enterprise Plan - ₹1999/month**\n• 👥 Multi-agent team support\n• 🎨 Custom branding options\n• 🔌 Full API access\n• 📈 Advanced market analytics\n• 🏢 Corporate dashboard\n• 💼 Dedicated account manager\n• ⚡ White-label solution\n• 🔐 Enterprise security\n\n**🎁 Special Offer:** 30% off first 3 months!\n\nReply with plan number:\n1️⃣ Keep Basic (Free)\n2️⃣ Upgrade to Premium\n3️⃣ Go Enterprise"
-            }
-          ]
-        }
-      },
-      "id": "subscription-plans",
-      "name": "Show Premium Plans",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [1300, 750]
-    },
-    {
-      "parameters": {
-        "url": "https://api.razorpay.com/v1/payment_links",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpBasicAuth",
-        "sendHeaders": "true",
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": "true",
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "amount",
-              "value": "99900"
-            },
-            {
-              "name": "currency",
-              "value": "INR"
-            },
-            {
-              "name": "description",
-              "value": "AI Real Estate Bot - Premium Subscription"
-            },
-            {
-              "name": "customer",
-              "value": "={{ { 'contact': $('Parse WhatsApp Data').item.json.phone, 'name': $('Parse WhatsApp Data').item.json.contactName, 'email': $('Parse WhatsApp Data').item.json.phone + '@realestate-bot.com' } }}"
-            },
-            {
-              "name": "callback_url",
-              "value": "https://your-domain.com/payment/success"
-            },
-            {
-              "name": "callback_method",
-              "value": "get"
-            },
-            {
-              "name": "expire_by",
-              "value": "={{ Math.floor((Date.now() + 24*60*60*1000) / 1000) }}"
-            }
-          ]
-        }
-      },
-      "id": "razorpay-payment",
-      "name": "Create RazorPay Payment",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 1,
-      "position": [1500, 750]
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "response",
-              "value": "👨‍💼 **Agent Verification Program**\n\n🔒 **Become a Verified Real Estate Agent**\n\n**Required Documents:**\n📄 **1.** Aadhar Card (Government ID)\n📋 **2.** Real Estate License (RERA Registration)\n🏢 **3.** Business Registration Certificate\n📞 **4.** Professional Contact Details\n💼 **5.** Experience Certificates\n🏦 **6.** Bank Account Verification\n\n**🎁 Agent Benefits:**\n• ✅ Verified Agent Badge\n• 🚀 Priority listing placement\n• 📊 Advanced analytics dashboard\n• 💰 Lead generation tools\n• 🤝 Direct client connections\n• 📱 Agent portfolio website\n• 💎 Premium support\n\n**📋 Verification Process:**\n1. Document submission\n2. AI-powered validation\n3. Manual review (24-48 hours)\n4. Video verification call\n5. Agent certification\n\n**Reply with 'START VERIFICATION' to begin the process.**\n\n🔐 All documents are encrypted and stored securely."
-            }
-          ]
-        }
-      },
-      "id": "agent-verification",
-      "name": "Agent Verification Process",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [1300, 850]
-    },
-    {
-      "parameters": {
-        "model": "gpt-4",
-        "options": {
-          "temperature": 0.1,
-          "maxTokens": 300
-        },
-        "messages": [
-          {
-            "role": "system",
-            "content": "You are an expert real estate AI assistant. Validate property listings for accuracy, legal compliance, and market reasonableness. Check for suspicious patterns, unrealistic prices, missing mandatory information, and potential fraud indicators. Return JSON: {\"isValid\": boolean, \"confidence\": number, \"issues\": [], \"recommendations\": [], \"riskScore\": number}"
-          },
-          {
-            "role": "user",
-            "content": "Validate this property data: {{ JSON.stringify($json) }}"
-          }
+        "table": "properties",
+        "columns": ["phone", "property_type", "location", "price"],
+        "values": [
+          "={{ $json.data.phone }}",
+          "={{ $json.data.property_type }}",
+          "={{ $json.data.location }}",
+          "={{ $json.data.price }}"
         ]
       },
-      "id": "ai-validator",
-      "name": "AI Property Validator",
-      "type": "n8n-nodes-base.openAi",
-      "typeVersion": 1,
-      "position": [1500, 450]
-    },
-    {
-      "parameters": {
-        "operation": "insert",
-        "schema": "public",
-        "table": "analytics",
-        "columns": "user_phone,event_type,event_data,timestamp,session_id,user_agent,ip_address",
-        "values": "={{ $('Parse WhatsApp Data').item.json.phone }},{{ $json.eventType || 'user_interaction' }},{{ JSON.stringify({ 'action': $json.userMessage || 'unknown', 'step': $json.step || 'general', 'intent': $json.intent || 'unknown', 'response_time': Date.now() - $('Parse WhatsApp Data').item.json.timestamp }) }},{{ new Date().toISOString() }},{{ $('Parse WhatsApp Data').item.json.sessionId || 'session_' + Date.now() }},WhatsApp_Bot,{{ $('Parse WhatsApp Data').item.json.ip || '0.0.0.0' }}"
-      },
-      "id": "analytics",
-      "name": "Advanced Analytics Tracking",
+      "id": "Insert Listing",
+      "name": "Insert Listing",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 1,
-      "position": [1900, 850]
+      "position": [1100, 300]
     },
     {
       "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "finalResponse",
-              "value": "={{ $json.response || '🤖 **AI Real Estate Assistant**\\n\\nI\\'m here to help you with all your property needs!\\n\\n**Quick Commands:**\\n• `list` - List your property\\n• `search [query]` - Find properties\\n• `profile` - View your account\\n• `subscribe` - Premium plans\\n• `verify agent` - Agent verification\\n• `help` - Get assistance\\n\\n**Voice Support:** Send voice messages for hands-free operation! 🎙️\\n\\n**Need help?** Just ask me anything about real estate!' }}"
-            },
-            {
-              "name": "to",
-              "value": "={{ $('Parse WhatsApp Data').item.json.phone }}"
-            },
-            {
-              "name": "messageId",
-              "value": "={{ 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9) }}"
-            }
-          ]
-        }
+        "chatResponse": "={{ $json.next_question || 'Your property has been listed successfully!' }}"
       },
-      "id": "format-response",
-      "name": "Format Final Response",
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 1,
-      "position": [2100, 400]
-    },
-    {
-      "parameters": {
-        "url": "https://graph.facebook.com/v18.0/YOUR_PHONE_NUMBER_ID/messages",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
-        "sendHeaders": "true",
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "Bearer YOUR_WHATSAPP_ACCESS_TOKEN"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": "true",
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "messaging_product",
-              "value": "whatsapp"
-            },
-            {
-              "name": "to",
-              "value": "={{ $json.to }}"
-            },
-            {
-              "name": "type",
-              "value": "text"
-            },
-            {
-              "name": "text",
-              "value": "={{ { 'body': $json.finalResponse, 'preview_url': true } }}"
-            }
-          ]
-        },
-        "options": {
-          "response": {
-            "response": {
-              "neverError": "true"
-            }
-          }
-        }
-      },
-      "id": "send-whatsapp",
-      "name": "Send WhatsApp Message",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 1,
-      "position": [2300, 400]
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ { 'status': 'success', 'message': 'AI Real Estate Bot processed message successfully', 'messageId': $json.messageId, 'timestamp': new Date().toISOString(), 'processingTime': Date.now() - $('Parse WhatsApp Data').item.json.timestamp + 'ms' } }}"
-      },
-      "id": "webhook-response",
-      "name": "Webhook Success Response",
+      "id": "Respond to WhatsApp",
+      "name": "Respond to WhatsApp",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [2500, 400]
+      "position": [1300, 300]
     }
   ],
   "connections": {
-    "WhatsApp Webhook": {
-      "main": [
-        [
-          {
-            "node": "Parse WhatsApp Data",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "WhatsApp Trigger": {
+      "main": [[{ "node": "Extract Phone", "type": "main", "index": 0 }]]
     },
-    "Parse WhatsApp Data": {
-      "main": [
-        [
-          {
-            "node": "Check User Authentication",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "Extract Phone": {
+      "main": [[{ "node": "Check User Exists", "type": "main", "index": 0 }]]
     },
-    "Check User Authentication": {
-      "main": [
-        [
-          {
-            "node": "User Exists Check",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "Check User Exists": {
+      "main": [[{ "node": "User Exists Check", "type": "main", "index": 0 }]]
     },
     "User Exists Check": {
       "main": [
+        [{ "node": "Conversation Logic", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Conversation Logic": {
+      "main": [
         [
-          {
-            "node": "Register New User",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Analyze Message Intent",
-            "type": "main",
-            "index": 0
-          }
+          { "node": "Insert Listing", "type": "main", "index": 0 },
+          { "node": "Respond to WhatsApp", "type": "main", "index": 0 }
         ]
       ]
     },
-    "Register New User": {
-      "main": [
-        [
-          {
-            "node": "Generate OTP",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Generate OTP": {
-      "main": [
-        [
-          {
-            "node": "Store OTP",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Store OTP": {
-      "main": [
-        [
-          {
-            "node": "Format OTP Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Format OTP Response": {
-      "main": [
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Analyze Message Intent": {
-      "main": [
-        [
-          {
-            "node": "AI Intent Classification",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "AI Intent Classification": {
-      "main": [
-        [
-          {
-            "node": "Verify OTP",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Smart Property Listing",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "AI Property Search Engine",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Get User Profile",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Show Premium Plans",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Agent Verification Process",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Verify OTP": {
-      "main": [
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Smart Property Listing": {
-      "main": [
-        [
-          {
-            "node": "AI Property Validator",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "AI Property Validator": {
-      "main": [
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "AI Property Search Engine": {
-      "main": [
-        [
-          {
-            "node": "Intelligent Property Search",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Intelligent Property Search": {
-      "main": [
-        [
-          {
-            "node": "Generate Secure Property Links",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Generate Secure Property Links": {
-      "main": [
-        [
-          {
-            "node": "Format Search Results",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Format Search Results": {
-      "main": [
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get User Profile": {
-      "main": [
-        [
-          {
-            "node": "Format Profile Dashboard",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Format Profile Dashboard": {
-      "main": [
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Show Premium Plans": {
-      "main": [
-        [
-          {
-            "node": "Create RazorPay Payment",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Create RazorPay Payment": {
-      "main": [
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Agent Verification Process": {
-      "main": [
-        [
-          {
-            "node": "Format Final Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Format Final Response": {
-      "main": [
-        [
-          {
-            "node": "Send WhatsApp Message",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Send WhatsApp Message": {
-      "main": [
-        [
-          {
-            "node": "Advanced Analytics Tracking",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Advanced Analytics Tracking": {
-      "main": [
-        [
-          {
-            "node": "Webhook Success Response",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "Insert Listing": {
+      "main": [[{ "node": "Respond to WhatsApp", "type": "main", "index": 0 }]]
     }
-  },
-  "active": true,
-  "settings": {
-    "executionOrder": "v1",
-    "saveDataErrorExecution": "all",
-    "saveDataSuccessExecution": "all",
-    "saveManualExecutions": true,
-    "callerPolicy": "workflowsFromSameOwner",
-    "errorWorkflow": "",
-    "timezone": "Asia/Kolkata"
-  },
-  "staticData": {},
-  "tags": [
-    {
-      "id": "ai-real-estate-bot",
-      "name": "AI Real Estate Bot",
-      "createdAt": "2025-01-13T17:51:00.000Z",
-      "updatedAt": "2025-01-13T17:51:00.000Z"
-    }
-  ],
-  "triggerCount": 1,
-  "updatedAt": "2025-01-13T17:51:00.000Z",
-  "createdAt": "2025-01-13T17:51:00.000Z",
-  "versionId": "1"
+  }
 }
